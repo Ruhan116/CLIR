@@ -106,37 +106,7 @@ def normalize_date(raw: str) -> str:
 
 
 def extract_date_generic(soup: BeautifulSoup, url: str) -> str:
-    meta_props = [
-        "article:published_time",
-        "og:pubdate",
-        "pubdate",
-        "publishdate",
-        "date",
-        "dc.date",
-        "dc.date.issued",
-        "originalpublicationdate",
-    ]
-    for prop in meta_props:
-        el = soup.find("meta", attrs={"property": prop}) or soup.find(
-            "meta", attrs={"name": prop}
-        )
-        if el and el.get("content"):
-            dt = normalize_date(el["content"])
-            if dt:
-                return dt
-
-    time_el = soup.find("time")
-    if time_el:
-        for attr in ("datetime", "content"):
-            if time_el.get(attr):
-                dt = normalize_date(time_el[attr])
-                if dt:
-                    return dt
-        txt = time_el.get_text(strip=True)
-        dt = normalize_date(txt)
-        if dt:
-            return dt
-
+    # Try JSON-LD first (most reliable)
     for s in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(s.string or "")
@@ -146,13 +116,68 @@ def extract_date_generic(soup: BeautifulSoup, url: str) -> str:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            if item.get("@type", "").lower() in ("article", "newsarticle"):
-                for key in ("datePublished", "dateCreated", "dateModified"):
-                    if key in item and item[key]:
-                        dt = normalize_date(str(item[key]))
-                        if dt:
-                            return dt
+            # Check for datePublished in main object
+            for key in ("datePublished", "dateCreated", "dateModified"):
+                if key in item and item[key]:
+                    dt = normalize_date(str(item[key]))
+                    if dt:
+                        return dt
+            # Check @graph for nested date info
+            if "@graph" in item and isinstance(item["@graph"], list):
+                for g in item["@graph"]:
+                    if isinstance(g, dict):
+                        for key in ("datePublished", "dateCreated", "dateModified"):
+                            if key in g and g[key]:
+                                dt = normalize_date(str(g[key]))
+                                if dt:
+                                    return dt
 
+    # Meta tags
+    meta_attrs = [
+        ("property", "article:published_time"),
+        ("name", "pubdate"),
+        ("name", "publishdate"),
+        ("itemprop", "datePublished"),
+        ("property", "og:pubdate"),
+        ("name", "date"),
+        ("name", "dc.date"),
+        ("name", "dc.date.issued"),
+        ("name", "originalpublicationdate"),
+    ]
+    for attr, val in meta_attrs:
+        el = soup.find("meta", attrs={attr: val})
+        if el and el.get("content"):
+            dt = normalize_date(el["content"])
+            if dt:
+                return dt
+
+    # Time tag
+    time_el = soup.find("time")
+    if time_el:
+        if time_el.get("datetime"):
+            dt = normalize_date(time_el["datetime"])
+            if dt:
+                return dt
+        txt = time_el.get_text(strip=True)
+        dt = normalize_date(txt)
+        if dt:
+            return dt
+
+    # Common CSS selectors (including BSS-specific .entry_update)
+    for sel in ('.entry_update', '.date', '.post-date', '.published', '.entry-meta time'):
+        el = soup.select_one(sel)
+        if el:
+            txt = el.get_text(strip=True)
+            if txt:
+                # For entry_update (BSS), extract only the first date (before "Update")
+                if 'Update' in txt or 'update' in txt:
+                    txt = txt.split('Update')[0].strip()
+                    txt = txt.rstrip(':').strip()
+                dt = normalize_date(txt)
+                if dt:
+                    return dt
+
+    # Try extracting from URL patterns
     m = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", url)
     if m:
         y, mo, d = map(int, m.groups())
@@ -370,30 +395,33 @@ def parse_dailystar(soup: BeautifulSoup, url: str) -> Optional[dict]:
     return {"title": title, "body": body, "date": extract_date_generic(soup, url)}
 
 
+# Get the directory where this script is located
+SCRIPT_DIR = Path(__file__).parent
+
 SITE_CONFIGS = [
     {
         "name": "bss",
-        "link_file": "bss_article_links",
+        "link_file": str(SCRIPT_DIR / "bss_article_links"),
         "parser": parse_bss,
     },
     {
         "name": "newage",
-        "link_file": "newagebd_links",
+        "link_file": str(SCRIPT_DIR / "newagebd_links"),
         "parser": parse_newage,
     },
     {
         "name": "dhakatribune",
-        "link_file": "dhakatribune_links",
+        "link_file": str(SCRIPT_DIR / "dhakatribune_links"),
         "parser": parse_dhakatribune,
     },
     {
         "name": "tbs",
-        "link_file": "tbsnews_links",
+        "link_file": str(SCRIPT_DIR / "tbsnews_links"),
         "parser": parse_tbs,
     },
     {
         "name": "dailystar",
-        "link_file": "daily_star_links.txt",
+        "link_file": str(SCRIPT_DIR / "daily_star_links"),
         "parser": parse_dailystar,
     },
 ]
@@ -471,13 +499,14 @@ def harvest_site(conn: sqlite3.Connection, cfg: dict, target: int) -> int:
         if not parsed or not parsed.get("body"):
             continue
         language = detect_language(soup) or "en"
-        date = parsed.get("date") or extract_date_generic(soup, url)
+        raw_date = parsed.get("date") or extract_date_generic(soup, url)
+        norm_date = normalize_date(raw_date) if raw_date else ""
         row = {
             "source": cfg["name"],
             "title": parsed.get("title", ""),
             "body": parsed.get("body", ""),
             "url": url,
-            "date": date,
+            "date": norm_date,
             "language": language,
         }
         if insert_article(conn, row):

@@ -11,6 +11,7 @@ from typing import List
 
 import requests
 from bs4 import BeautifulSoup
+import json
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -111,6 +112,63 @@ def extract_body(soup: BeautifulSoup) -> str:
     return '\n\n'.join(ps)
 
 
+def extract_date(soup: BeautifulSoup) -> str:
+    # Try JSON-LD first
+    for s in soup.find_all('script', type='application/ld+json'):
+        try:
+            data = json.loads(s.string or '')
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                for key in ('datePublished', 'dateCreated', 'dateModified'):
+                    if key in item and item[key]:
+                        return str(item[key]).strip()
+                if '@graph' in item and isinstance(item['@graph'], list):
+                    for g in item['@graph']:
+                        for key in ('datePublished', 'dateCreated', 'dateModified'):
+                            if key in g and g[key]:
+                                return str(g[key]).strip()
+        except Exception:
+            continue
+
+    # Common meta tags
+    meta_attrs = [
+        ('property', 'article:published_time'),
+        ('name', 'pubdate'),
+        ('name', 'publishdate'),
+        ('itemprop', 'datePublished'),
+    ]
+    for attr, val in meta_attrs:
+        m = soup.find('meta', attrs={attr: val})
+        if m and m.get('content'):
+            return m.get('content').strip()
+
+    # time tag
+    t = soup.find('time')
+    if t:
+        if t.get('datetime'):
+            return t.get('datetime').strip()
+        txt = t.get_text(strip=True)
+        if txt:
+            return txt
+
+    # some common classes
+    for sel in ('.entry_update', '.date', '.post-date', '.published', '.entry-meta time'):
+        el = soup.select_one(sel)
+        if el:
+            txt = el.get_text(strip=True)
+            if txt:
+                # For entry_update, extract only the first date (before "Update")
+                if 'Update' in txt or 'update' in txt:
+                    txt = txt.split('Update')[0].strip()
+                    # Remove any trailing symbols like ':' or newlines
+                    txt = txt.rstrip(':').strip()
+                return txt
+
+    return ''
+
+
 def fetch_article(url: str) -> dict | None:
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -120,9 +178,10 @@ def fetch_article(url: str) -> dict | None:
     soup = BeautifulSoup(resp.content, 'html.parser')
     title = extract_title(soup)
     body = extract_body(soup)
+    date = extract_date(soup)
     if not body:
         return None
-    return {'url': url, 'title': title, 'body': body}
+    return {'url': url, 'title': title, 'body': body, 'date': date}
 
 
 def main() -> int:
@@ -162,7 +221,8 @@ def main() -> int:
             for i, a in enumerate(found, 1):
                 f.write(f"--- ARTICLE {i} ---\n")
                 f.write(f"URL: {a['url']}\n")
-                f.write(f"TITLE: {a['title']}\n\n")
+                f.write(f"TITLE: {a['title']}\n")
+                f.write(f"DATE: {a.get('date','')}\n\n")
                 f.write(a['body'] + '\n\n')
         print(f"Saved {len(found)} stories to {out_file}")
     except Exception as e:
