@@ -3,6 +3,7 @@ certifi==2025.11.12
 charset-normalizer==3.4.4
 cloudscraper==1.2.71
 colorama==0.4.6
+deep-translator==1.11.4
 emoji==2.15.0
 filelock==3.20.1
 fsspec==2025.12.0
