@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Examples of using the BM25CLIR system for various search tasks."""
 
+import sys
+import io
+
+# Handle Unicode output on Windows
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 from bm25_clir import BM25CLIR
 
 

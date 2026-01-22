@@ -78,7 +78,7 @@ class CLIRSearch:
     def load_from_database(self, db_path: str) -> None:
         """
         Load documents from SQLite database.
-        
+
         Args:
             db_path (str): Path to database file
         """
@@ -88,11 +88,11 @@ class CLIRSearch:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
-        # Get all documents
+        # Get all documents (using actual column names from combined_dataset.db)
         cursor.execute("""
-            SELECT doc_id, title, body, url, date, language, token_count
+            SELECT id, title, body, url, date, language, tokens
             FROM articles
-            ORDER BY doc_id
+            ORDER BY id
         """)
 
         for row in cursor.fetchall():
@@ -108,7 +108,7 @@ class CLIRSearch:
             })
 
         conn.close()
-        print(f"✓ Loaded {len(self.documents)} documents from database")
+        print(f"[OK] Loaded {len(self.documents)} documents from database")
 
     def search_bm25(
         self,
