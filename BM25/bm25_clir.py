@@ -9,6 +9,7 @@ English and Bangla news dataset. It supports:
 - Query translation
 - Score normalization across languages
 - Result merging from multiple languages
+- Persistent inverted index for fast startup (optional)
 """
 
 import sqlite3
@@ -16,8 +17,21 @@ import re
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from rank_bm25 import BM25Okapi
 import numpy as np
+
+# Try to import rank_bm25 for in-memory indexing
+try:
+    from rank_bm25 import BM25Okapi
+    HAS_RANK_BM25 = True
+except ImportError:
+    HAS_RANK_BM25 = False
+
+# Try to import the inverted index module
+try:
+    from inverted_index import InvertedIndex
+    HAS_INVERTED_INDEX = True
+except ImportError:
+    HAS_INVERTED_INDEX = False
 
 # Try to import translation libraries
 try:
@@ -46,58 +60,84 @@ class Article:
 
 
 class BM25CLIR:
-    """BM25-based Cross-Lingual Information Retrieval System with full CLIR features."""
-    
-    def __init__(self, db_path: str = None, enable_translation: bool = True):
+    """BM25-based Cross-Lingual Information Retrieval System with full CLIR features.
+
+    Supports two indexing modes:
+    1. In-memory (rank_bm25): Fast but requires rebuild on each startup
+    2. Persistent (inverted_index): SQLite-based, instant startup after initial build
+    """
+
+    def __init__(self, db_path: str = None, enable_translation: bool = True,
+                 use_inverted_index: bool = True):
         """Initialize the BM25 CLIR system.
-        
+
         Args:
-            db_path: Path to the SQLite database. Defaults to combined_dataset.db
+            db_path: Path to the SQLite database. Defaults to combined_dataset.db in BM25 folder
             enable_translation: Enable automatic query translation (requires translation library)
+            use_inverted_index: Use persistent SQLite inverted index (default: True)
+                               Falls back to in-memory rank_bm25 if inverted_index not available
         """
+        # Determine database path
+        script_dir = Path(__file__).parent
         if db_path is None:
-            script_dir = Path(__file__).parent.parent
-            db_path = script_dir / "dataset_enhanced" / "combined_dataset.db"
-        
+            # First try BM25 folder, then dataset_enhanced
+            db_path = script_dir / "combined_dataset.db"
+            if not db_path.exists():
+                db_path = script_dir.parent / "dataset_enhanced" / "combined_dataset.db"
+
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
-        
+
+        # Indexing mode selection
+        self.use_inverted_index = use_inverted_index and HAS_INVERTED_INDEX
+        if use_inverted_index and not HAS_INVERTED_INDEX:
+            print("[WARN] Inverted index module not available, falling back to in-memory mode")
+
         # Storage for articles and BM25 models
         self.articles: Dict[str, List[Article]] = {"en": [], "bn": []}
+        self.articles_by_id: Dict[int, Article] = {}  # Fast lookup by ID
         self.tokenized_docs: Dict[str, List[List[str]]] = {"en": [], "bn": []}
-        self.bm25_models: Dict[str, BM25Okapi] = {}
-        
+        self.bm25_models: Dict[str, Optional[BM25Okapi]] = {"en": None, "bn": None}
+
+        # Inverted index
+        self.inverted_index: Optional[InvertedIndex] = None
+        if self.use_inverted_index:
+            index_path = script_dir / "bm25_index.sqlite"
+            self.inverted_index = InvertedIndex(index_path=index_path, source_db_path=self.db_path)
+
         # Translation settings
         self.enable_translation = enable_translation and (HAS_GOOGLETRANS or HAS_DEEP_TRANSLATOR)
         self.translator = None
-        
+
         if self.enable_translation:
             if HAS_DEEP_TRANSLATOR:
                 # Preferred: deep_translator (more reliable)
                 self.translator = "deep_translator"
-                print("✓ Using deep_translator for query translation")
+                print("[OK] Using deep_translator for query translation")
             elif HAS_GOOGLETRANS:
                 # Fallback: googletrans
                 self.translator = Translator()
-                print("✓ Using googletrans for query translation")
+                print("[OK] Using googletrans for query translation")
         else:
             if enable_translation:
-                print("⚠ Translation disabled: Install 'deep-translator' or 'googletrans' for cross-lingual search")
-        
+                print("[WARN] Translation disabled: Install 'deep-translator' or 'googletrans' for cross-lingual search")
+
         # Load articles from database
         self._load_articles()
-        self.tokenized_docs: Dict[str, List[List[str]]] = {"en": [], "bn": []}
-        self.bm25_models: Dict[str, BM25Okapi] = {}
-        
-        # Load articles from database
-        self._load_articles()
+
+        # Check if inverted index exists
+        if self.use_inverted_index:
+            if self.inverted_index.exists():
+                print("[OK] Using persistent inverted index (instant startup)")
+            else:
+                print("[WARN] Inverted index not found. Call build_index() to create it.")
     
     def _load_articles(self):
         """Load articles from the database."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         # Load English articles
         cursor.execute("""
             SELECT id, source, title, body, url, date, language
@@ -105,8 +145,10 @@ class BM25CLIR:
             WHERE language = 'en' AND body IS NOT NULL AND body != ''
         """)
         for row in cursor.fetchall():
-            self.articles["en"].append(Article(*row))
-        
+            article = Article(*row)
+            self.articles["en"].append(article)
+            self.articles_by_id[article.id] = article
+
         # Load Bangla articles
         cursor.execute("""
             SELECT id, source, title, body, url, date, language
@@ -114,10 +156,12 @@ class BM25CLIR:
             WHERE language = 'bn' AND body IS NOT NULL AND body != ''
         """)
         for row in cursor.fetchall():
-            self.articles["bn"].append(Article(*row))
-        
+            article = Article(*row)
+            self.articles["bn"].append(article)
+            self.articles_by_id[article.id] = article
+
         conn.close()
-        
+
         print(f"Loaded {len(self.articles['en'])} English articles")
         print(f"Loaded {len(self.articles['bn'])} Bangla articles")
     
@@ -168,7 +212,7 @@ class BM25CLIR:
                 result = self.translator.translate(query, src=source_lang, dest=target_lang)
                 return result.text
         except Exception as e:
-            print(f"⚠ Translation failed: {e}")
+            print(f"[WARN] Translation failed: {e}")
             return None
     
     def _tokenize_english(self, text: str) -> List[str]:
@@ -209,30 +253,53 @@ class BM25CLIR:
         
         return tokens
     
-    def build_index(self, language: str = "both"):
+    def build_index(self, language: str = "both", force_rebuild: bool = False):
         """Build BM25 index for specified language(s).
-        
+
         Args:
             language: "en", "bn", or "both" (default)
+            force_rebuild: Force rebuild even if persistent index exists
         """
+        # Use inverted index if available
+        if self.use_inverted_index:
+            if self.inverted_index.exists() and not force_rebuild:
+                print("[OK] Persistent inverted index already exists. Use force_rebuild=True to rebuild.")
+                return
+
+            print("\nBuilding persistent inverted index...")
+            self.inverted_index.build(language=language, show_progress=True)
+
+            # Show stats
+            stats = self.inverted_index.get_stats()
+            if stats:
+                print(f"\nIndex Statistics:")
+                print(f"  English: {stats.total_docs_en} docs, {stats.unique_terms_en} terms")
+                print(f"  Bangla: {stats.total_docs_bn} docs, {stats.unique_terms_bn} terms")
+                print(f"  Total postings: {stats.total_postings}")
+            return
+
+        # Fallback to in-memory rank_bm25
+        if not HAS_RANK_BM25:
+            raise RuntimeError("Neither inverted_index nor rank_bm25 is available. Install rank_bm25: pip install rank-bm25")
+
         languages = ["en", "bn"] if language == "both" else [language]
-        
+
         for lang in languages:
-            print(f"\nBuilding BM25 index for {lang}...")
-            
+            print(f"\nBuilding in-memory BM25 index for {lang}...")
+
             # Tokenize all documents
             tokenizer = self._tokenize_english if lang == "en" else self._tokenize_bangla
             self.tokenized_docs[lang] = []
-            
+
             for article in self.articles[lang]:
                 # Combine title and body for richer context
                 full_text = f"{article.title} {article.body}"
                 tokens = tokenizer(full_text)
                 self.tokenized_docs[lang].append(tokens)
-            
+
             # Build BM25 model
             self.bm25_models[lang] = BM25Okapi(self.tokenized_docs[lang])
-            print(f"✓ Indexed {len(self.tokenized_docs[lang])} {lang} documents")
+            print(f"[OK] Indexed {len(self.tokenized_docs[lang])} {lang} documents")
     
     def _normalize_scores(self, scores: np.ndarray) -> np.ndarray:
         """Normalize BM25 scores to [0, 1] range using min-max normalization.
@@ -254,68 +321,120 @@ class BM25CLIR:
         
         return (scores - min_score) / (max_score - min_score)
     
-    def search(self, 
-               query: str, 
+    def search(self,
+               query: str,
                language: str = "en",
                top_k: int = 10,
                normalize_scores: bool = False) -> List[Tuple[Article, float]]:
         """Search for articles using BM25.
-        
+
         Args:
             query: Search query
             language: Language to search in ("en" or "bn")
             top_k: Number of top results to return
             normalize_scores: Whether to normalize scores to [0, 1] range
-            
+
         Returns:
             List of (Article, score) tuples, sorted by relevance
         """
-        if language not in self.bm25_models:
-            raise ValueError(f"BM25 index not built for language: {language}")
-        
+        # Use inverted index if available and built
+        if self.use_inverted_index and self.inverted_index and self.inverted_index.exists():
+            return self._search_inverted_index(query, language, top_k, normalize_scores)
+
+        # Fallback to in-memory rank_bm25
+        return self._search_in_memory(query, language, top_k, normalize_scores)
+
+    def _search_inverted_index(self,
+                                query: str,
+                                language: str,
+                                top_k: int,
+                                normalize_scores: bool) -> List[Tuple[Article, float]]:
+        """Search using the persistent inverted index."""
+        # Get results from inverted index (returns article_id, score)
+        index_results = self.inverted_index.search(query, language, top_k=top_k * 2)
+
+        if not index_results:
+            return []
+
+        # Convert to Article objects
+        results = []
+        seen_urls = set()
+
+        for article_id, score in index_results:
+            article = self.articles_by_id.get(article_id)
+            if article is None:
+                continue
+
+            # Skip duplicate URLs
+            if article.url in seen_urls:
+                continue
+            seen_urls.add(article.url)
+
+            results.append((article, score))
+
+            if len(results) >= top_k:
+                break
+
+        # Normalize scores if requested
+        if normalize_scores and results:
+            scores = np.array([score for _, score in results])
+            normalized = self._normalize_scores(scores)
+            results = [(article, float(norm_score)) for (article, _), norm_score in zip(results, normalized)]
+
+        return results
+
+    def _search_in_memory(self,
+                          query: str,
+                          language: str,
+                          top_k: int,
+                          normalize_scores: bool) -> List[Tuple[Article, float]]:
+        """Search using in-memory rank_bm25 index."""
+        if self.bm25_models.get(language) is None:
+            raise ValueError(f"BM25 index not built for language: {language}. Call build_index() first.")
+
         # Tokenize query
         tokenizer = self._tokenize_english if language == "en" else self._tokenize_bangla
         query_tokens = tokenizer(query)
-        
+
         if not query_tokens:
             print("Warning: Query produced no tokens")
             return []
-        
+
         # Get BM25 scores
         scores = self.bm25_models[language].get_scores(query_tokens)
-        
+
         # Normalize scores if requested
         if normalize_scores:
             scores = self._normalize_scores(scores)
-        
+
         # Get top-k results, but get more candidates to filter
         top_indices = np.argsort(scores)[::-1][:top_k * 5]  # Get 5x results for filtering
-        
+
         results = []
         seen_urls = set()  # Track URLs to avoid duplicates
-        
+
         for idx in top_indices:
             if scores[idx] > 0:  # Only return positive scores
                 article = self.articles[language][idx]
-                
+
                 # Skip duplicate URLs
                 if article.url in seen_urls:
                     continue
                 seen_urls.add(article.url)
-                
+
                 # Verify article actually contains at least one query term
                 article_text = f"{article.title} {article.body}".lower()
                 article_tokens = set(tokenizer(article_text))
                 query_tokens_set = set(query_tokens)
-                
+
                 # Check if any query token appears in article
                 if query_tokens_set & article_tokens:  # Set intersection
                     results.append((article, float(scores[idx])))
-                    
+
                     # Stop when we have enough results
                     if len(results) >= top_k:
                         break
-        
+
         return results
     
     def search_cross_lingual(self,
@@ -349,11 +468,11 @@ class BM25CLIR:
         query_lang = self.detect_language(query) if auto_detect else "en"
         target_lang = "en" if query_lang == "bn" else "bn"
         
-        print(f"🔍 Query language detected: {'Bangla' if query_lang == 'bn' else 'English'}")
+        print(f"[SEARCH] Query language detected: {'Bangla' if query_lang == 'bn' else 'English'}")
         
         # Search in same language
         same_lang_results = self.search(query, language=query_lang, top_k=top_k, normalize_scores=True)
-        print(f"✓ Found {len(same_lang_results)} {query_lang.upper()} results")
+        print(f"[OK] Found {len(same_lang_results)} {query_lang.upper()} results")
         
         # Translate and search in other language
         cross_lang_results = []
@@ -362,13 +481,13 @@ class BM25CLIR:
         if self.enable_translation:
             translated_query = self.translate_query(query, target_lang)
             if translated_query:
-                print(f"📝 Translated query: {translated_query}")
+                print(f"[TRANSLATE] Translated query: {translated_query}")
                 cross_lang_results = self.search(translated_query, language=target_lang, top_k=top_k, normalize_scores=True)
-                print(f"✓ Found {len(cross_lang_results)} {target_lang.upper()} results (cross-lingual)")
+                print(f"[OK] Found {len(cross_lang_results)} {target_lang.upper()} results (cross-lingual)")
             else:
-                print(f"⚠ Could not translate query to {target_lang.upper()}")
+                print(f"[WARN] Could not translate query to {target_lang.upper()}")
         else:
-            print("⚠ Translation disabled - cross-lingual search not available")
+            print("[WARN] Translation disabled - cross-lingual search not available")
         
         # Merge results if requested
         if merge_results:
@@ -446,24 +565,26 @@ class BM25CLIR:
         
         return results
     
-    def get_article_by_id(self, article_id: int, language: str) -> Optional[Article]:
+    def get_article_by_id(self, article_id: int, language: str = None) -> Optional[Article]:
         """Retrieve a specific article by ID.
-        
+
         Args:
             article_id: Article ID
-            language: Article language
-            
+            language: Article language (optional, uses fast lookup if not provided)
+
         Returns:
             Article object or None if not found
         """
-        for article in self.articles[language]:
-            if article.id == article_id:
+        # Fast lookup using cached dictionary
+        if article_id in self.articles_by_id:
+            article = self.articles_by_id[article_id]
+            if language is None or article.language == language:
                 return article
         return None
     
     def get_statistics(self) -> Dict:
-        """Get dataset statistics.
-        
+        """Get dataset and index statistics.
+
         Returns:
             Dictionary containing various statistics
         """
@@ -471,16 +592,30 @@ class BM25CLIR:
             "total_articles": len(self.articles["en"]) + len(self.articles["bn"]),
             "english_articles": len(self.articles["en"]),
             "bangla_articles": len(self.articles["bn"]),
-            "indexed_languages": list(self.bm25_models.keys()),
+            "index_mode": "inverted_index" if self.use_inverted_index else "in_memory",
         }
-        
+
+        # Index-specific stats
+        if self.use_inverted_index and self.inverted_index and self.inverted_index.exists():
+            index_stats = self.inverted_index.get_stats()
+            if index_stats:
+                stats["index_stats"] = {
+                    "en_unique_terms": index_stats.unique_terms_en,
+                    "bn_unique_terms": index_stats.unique_terms_bn,
+                    "en_avgdl": index_stats.avgdl_en,
+                    "bn_avgdl": index_stats.avgdl_bn,
+                    "total_postings": index_stats.total_postings,
+                }
+        else:
+            stats["indexed_languages"] = [lang for lang, model in self.bm25_models.items() if model is not None]
+
         # Source distribution
         sources = {}
         for lang in ["en", "bn"]:
             for article in self.articles[lang]:
                 sources[article.source] = sources.get(article.source, 0) + 1
         stats["sources"] = sources
-        
+
         return stats
     
     def print_results(self, 
@@ -556,6 +691,13 @@ class BM25CLIR:
 
 def main():
     """Example usage with full CLIR features."""
+    import sys
+    import io
+
+    # Handle Unicode output on Windows
+    if sys.platform == 'win32':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
     print("="*80)
     print("BM25 Cross-Lingual Information Retrieval System")
     print("With Language Detection, Translation & Score Normalization")
@@ -574,7 +716,7 @@ def main():
     stats = clir.get_statistics()
     print(f"Total articles: {stats['total_articles']}")
     print(f"English: {stats['english_articles']}, Bangla: {stats['bangla_articles']}")
-    print(f"Indexed languages: {stats['indexed_languages']}")
+    print(f"Index mode: {stats['index_mode']}")
     
     # Test 1: Bangla Query with Cross-Lingual Search
     print("\n" + "="*80)
@@ -697,12 +839,12 @@ def main():
     print("All CLIR features demonstrated!")
     print("="*80)
     print("\nFeatures included:")
-    print("✓ 1. Dual Language Support (separate BM25 indexes)")
-    print("✓ 2. Automatic Language Detection")
-    print("✓ 3. Query Translation (EN ↔ BN)")
-    print("✓ 4. Proper Tokenization (different for EN and BN)")
-    print("✓ 5. Score Normalization (comparable across languages)")
-    print("✓ 6. Result Merging (combined and sorted by score)")
+    print("[OK] 1. Dual Language Support (separate BM25 indexes)")
+    print("[OK] 2. Automatic Language Detection")
+    print("[OK] 3. Query Translation (EN <-> BN)")
+    print("[OK] 4. Proper Tokenization (different for EN and BN)")
+    print("[OK] 5. Score Normalization (comparable across languages)")
+    print("[OK] 6. Result Merging (combined and sorted by score)")
     print("\nNote: Install 'deep-translator' for translation:")
     print("  pip install deep-translator")
 

@@ -9,6 +9,13 @@ Test script to demonstrate all 6 required CLIR features:
 6. Result Merging
 """
 
+import sys
+import io
+
+# Handle Unicode output on Windows
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 from bm25_clir import BM25CLIR
 
 
@@ -31,14 +38,15 @@ def main():
     clir.build_index("both")
     
     # Feature 1: Dual Language Support
-    print_header("✓ Feature 1: Dual Language Support")
+    print_header("[OK] Feature 1: Dual Language Support")
     print("Separate BM25 index for Bangla and English")
-    print(f"  • English index: {len(clir.articles['en'])} articles")
-    print(f"  • Bangla index: {len(clir.articles['bn'])} articles")
-    print(f"  • Indexed languages: {list(clir.bm25_models.keys())}")
+    print(f"  - English index: {len(clir.articles['en'])} articles")
+    print(f"  - Bangla index: {len(clir.articles['bn'])} articles")
+    stats = clir.get_statistics()
+    print(f"  - Index mode: {stats.get('index_mode', 'unknown')}")
     
     # Feature 2: Language Detection
-    print_header("✓ Feature 2: Language Detection")
+    print_header("[OK] Feature 2: Language Detection")
     print("Automatically detect if query is Bangla or English")
     
     test_queries = [
@@ -56,7 +64,7 @@ def main():
         print(f"  '{query}' → {lang_name}")
     
     # Feature 3: Query Translation
-    print_header("✓ Feature 3: Query Translation")
+    print_header("[OK] Feature 3: Query Translation")
     print("Translate Bangla queries to English & English queries to Bangla")
     
     translation_tests = [
@@ -75,7 +83,7 @@ def main():
             print(f"  '{query}' → {target_name}: [translation failed]")
     
     # Feature 4: Proper Tokenization
-    print_header("✓ Feature 4: Proper Tokenization")
+    print_header("[OK] Feature 4: Proper Tokenization")
     print("Different tokenization for Bangla and English")
     
     en_text = "The quick brown fox jumps, over the lazy dog."
@@ -90,7 +98,7 @@ def main():
     print(f"  Tokens: {bn_tokens[:10]}")
     
     # Feature 5: Score Normalization
-    print_header("✓ Feature 5: Score Normalization")
+    print_header("[OK] Feature 5: Score Normalization")
     print("BM25 scores normalized to [0, 1] for cross-language comparison")
     
     query = "করোনা ভ্যাকসিন"
@@ -109,7 +117,7 @@ def main():
         print(f"    {i}. Score: {score:.4f} - {article.title[:50]}...")
     
     # Feature 6: Result Merging
-    print_header("✓ Feature 6: Result Merging")
+    print_header("[OK] Feature 6: Result Merging")
     print("Combine results from both languages & sort by score")
     
     bangla_query = "করোনা ভ্যাকসিন"
@@ -162,29 +170,29 @@ def main():
     # Summary
     print_header("Summary: All 6 CLIR Features Implemented")
     print("""
-✅ 1. Dual Language Support
+[OK] 1. Dual Language Support
      - Separate BM25 index for Bangla and English
      - Can search both simultaneously
-     
-✅ 2. Language Detection
+
+[OK] 2. Language Detection
      - Automatically detect if query is Bangla or English
      - Uses Unicode ranges (U+0980 to U+09FF for Bangla)
-     
-✅ 3. Query Translation
+
+[OK] 3. Query Translation
      - Translate Bangla queries to English (to search English docs)
      - Translate English queries to Bangla (to search Bangla docs)
      - Uses deep-translator library
-     
-✅ 4. Proper Tokenization
+
+[OK] 4. Proper Tokenization
      - Different tokenization for Bangla and English
-     - Handles Bangla punctuation (।) differently from English (.)
-     
-✅ 5. Score Normalization
+     - Handles Bangla punctuation differently from English
+
+[OK] 5. Score Normalization
      - BM25 scores normalized to [0, 1] range
      - Scores from different languages are comparable
      - Uses min-max normalization
-     
-✅ 6. Result Merging
+
+[OK] 6. Result Merging
      - Combine results from both languages
      - Sort by normalized score
      - Track which language each result is from
