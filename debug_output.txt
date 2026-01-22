@@ -1,0 +1,55 @@
+================================================================================
+CLIR System Evaluation
+================================================================================
+Loaded 6 queries with relevant documents.
+[WARN] Translation disabled: Install 'deep-translator' or 'googletrans' for cross-lingual search
+Loaded 2500 English articles
+Loaded 2500 Bangla articles
+[OK] Using persistent inverted index (instant startup)
+[WARN] Translation disabled: Install 'deep-translator' or 'googletrans' for cross-lingual search
+Loaded 2500 English articles
+Loaded 2500 Bangla articles
+[OK] Using persistent inverted index (instant startup)
+[OK] Loaded 5000 documents from database
+[WARN] Translation disabled: Install 'deep-translator' or 'googletrans' for cross-lingual search
+Loaded 2500 English articles
+Loaded 2500 Bangla articles
+[OK] Using persistent inverted index (instant startup)
+
+Evaluating BM25...
+[SEARCH] Query language detected: English
+[OK] Found 50 EN results
+[WARN] Translation disabled - cross-lingual search not available
+[SEARCH] Query language detected: Bangla
+[OK] Found 50 BN results
+[WARN] Translation disabled - cross-lingual search not available
+[SEARCH] Query language detected: English
+[OK] Found 50 EN results
+[WARN] Translation disabled - cross-lingual search not available
+[SEARCH] Query language detected: Bangla
+[OK] Found 17 BN results
+[WARN] Translation disabled - cross-lingual search not available
+[SEARCH] Query language detected: English
+[OK] Found 50 EN results
+[WARN] Translation disabled - cross-lingual search not available
+[SEARCH] Query language detected: Bangla
+[OK] Found 50 BN results
+[WARN] Translation disabled - cross-lingual search not available
+  > Mean P@10: 0.7500
+  > Mean nDCG@10: 0.9992
+  > Mean MRR: 1.0000
+
+Evaluating Hybrid...
+  > Mean P@10: 0.3500
+  > Mean nDCG@10: 0.4708
+  > Mean MRR: 0.5000
+
+Summary metrics saved to evaluation_results_metrics.csv
+Detailed results saved to evaluation_results_detailed.csv
+
+================================================================================
+FINAL RESULTS SUMMARY
+================================================================================
+ Model  Mean P@10  Mean R@10  Mean nDCG@10  Mean MRR  Avg Time (s)
+  BM25       0.75   1.000000      0.999181       1.0      0.203337
+Hybrid       0.35   0.462963      0.470770       0.5     55.052836

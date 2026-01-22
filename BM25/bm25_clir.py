@@ -31,7 +31,11 @@ try:
     from inverted_index import InvertedIndex
     HAS_INVERTED_INDEX = True
 except ImportError:
-    HAS_INVERTED_INDEX = False
+    try:
+        from BM25.inverted_index import InvertedIndex
+        HAS_INVERTED_INDEX = True
+    except ImportError:
+        HAS_INVERTED_INDEX = False
 
 # Try to import translation libraries
 try:

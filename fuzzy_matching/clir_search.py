@@ -15,11 +15,18 @@ from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 from collections import defaultdict
 
-from fuzzy_matcher import FuzzyMatcher
+try:
+    from fuzzy_matcher import FuzzyMatcher
+except ImportError:
+    try:
+        from fuzzy_matching.fuzzy_matcher import FuzzyMatcher
+    except ImportError:
+        print("Warning: Could not import FuzzyMatcher")
+        FuzzyMatcher = None
 
 # Try to import BM25 from existing module
 try:
-    from BM25.bm25_clir import BM25Retriever
+    from BM25.bm25_clir import BM25CLIR
     BM25_AVAILABLE = True
 except ImportError:
     BM25_AVAILABLE = False
@@ -54,7 +61,7 @@ class CLIRSearch:
         """
         self.documents = []
         self.fuzzy_matcher = FuzzyMatcher()
-        self.bm25_retriever = None
+        self.bm25_clir = None
         self.transliteration_map = transliteration_map or {}
 
         # Load documents from database or memory
@@ -68,10 +75,12 @@ class CLIRSearch:
         # Initialize BM25 if available
         if BM25_AVAILABLE:
             try:
-                self.bm25_retriever = BM25Retriever(
-                    documents=self.documents,
-                    language='en'
-                )
+                # Initialize BM25CLIR with the same db_path if provided
+                self.bm25_clir = BM25CLIR(db_path=db_path)
+                # Ensure index is ready (in-memory fallback handles itself, but good to trigger load)
+                if not self.bm25_clir.use_inverted_index:
+                     self.bm25_clir.build_index("both")
+                     
             except Exception as e:
                 print(f"Warning: Could not initialize BM25 retriever: {e}")
 
@@ -127,16 +136,32 @@ class CLIRSearch:
         Returns:
             list: Top-k results with BM25 scores
         """
-        if not self.bm25_retriever:
+        if not self.bm25_clir:
             return []
 
         try:
-            results = self.bm25_retriever.search(
+            # BM25CLIR.search returns List[Tuple[Article, float]]
+            results = self.bm25_clir.search(
                 query=query,
+                language=language,
                 top_k=top_k,
-                language=language
+                normalize_scores=True
             )
-            return results
+            
+            # Convert to list of dicts to match CLIRSearch expected format
+            formatted_results = []
+            for article, score in results:
+                formatted_results.append({
+                    'doc_id': article.id,
+                    'title': article.title,
+                    'body': article.body,
+                    'url': article.url,
+                    'date': article.date,
+                    'language': article.language,
+                    'bm25_score': score
+                })
+                
+            return formatted_results
         except Exception as e:
             print(f"Error in BM25 search: {e}")
             return []
@@ -313,7 +338,7 @@ class CLIRSearch:
         weights = {k: v / total_weight for k, v in weights.items()}
 
         # BM25 search
-        if weights.get('bm25', 0) > 0 and self.bm25_retriever:
+        if weights.get('bm25', 0) > 0 and self.bm25_clir:
             start = time.time()
             bm25_results = self.search_bm25(query, top_k=top_k * 2)
             timing['bm25'] = time.time() - start
@@ -428,7 +453,7 @@ class CLIRSearch:
         }
 
         # BM25
-        if self.bm25_retriever:
+        if self.bm25_clir:
             start = time.time()
             bm25_results = self.search_bm25(query, top_k=top_k)
             results['methods']['bm25'] = {
